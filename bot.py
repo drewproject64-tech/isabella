@@ -6,6 +6,8 @@ import os
 import re
 import time
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Event, Thread
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -147,6 +149,13 @@ def main():
     if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
         raise SystemExit("Set BOT_TOKEN to the token from BotFather.")
 
+    ready = Event()
+    port = os.environ.get("PORT")
+    if port:
+        start_health_server(int(port), ready)
+
+    # This instance uses polling. Preserve queued messages when removing a webhook.
+    telegram(token, "deleteWebhook", drop_pending_updates=False)
     telegram(token, "setMyName", name=NAME)
     telegram(token, "setMyShortDescription", short_description=ABOUT)
     telegram(token, "setMyDescription", description=DESCRIPTION)
@@ -162,9 +171,11 @@ def main():
             updates = telegram(token, "getUpdates", offset=offset, timeout=25,
                                allowed_updates=["message", "callback_query"])
         except TelegramError as error:
+            ready.clear()
             logging.warning("%s while polling", error)
             time.sleep(max(3, error.retry_after))
             continue
+        ready.set()
         for update in updates:
             try:
                 handle_update(token, update)
@@ -173,6 +184,26 @@ def main():
                 if error.retry_after:
                     time.sleep(error.retry_after)
             offset = update["update_id"] + 1
+
+
+def start_health_server(port, ready):
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/", "/health", "/healthz"):
+                self.send_error(404)
+                return
+            healthy = ready.is_set()
+            self.send_response(200 if healthy else 503)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Trader Isabella is ready.\n" if healthy else b"Telegram polling is unavailable.\n")
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 if __name__ == "__main__":
